@@ -93,15 +93,26 @@ All features are computed from data available before tip-off. No game-day stats.
 
 ```bash
 pip install -r requirements.txt
-
-# Re-run data ingestion (2-3hr for full 9 seasons due to per-game API calls)
-python -m src.data.ingest --seasons all
-
-# Or skip the slow boxscore step to get the game list only
-python -m src.data.ingest --seasons all --skip-boxscores
 ```
 
-Raw data is gitignored (large, regeneratable). The ingestion script is checkpointed - safe to interrupt and resume.
+### Data sources
+
+All raw data is gitignored (large, regeneratable).
+
+**Option A - Kaggle dataset (recommended, no API issues):**
+1. Download the [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) from Kaggle
+2. Place `games_details.csv` and `games.csv` in `data/`
+3. Run ingestion:
+```bash
+python -m src.data.ingest --from-kaggle
+```
+Covers 2003-04 through 2021-22 (19 complete seasons).
+
+**Option B - nba_api (adds 2022-23 and 2023-24):**
+```bash
+python -m src.data.ingest --seasons 2022-23,2023-24
+```
+Requires stats.nba.com to be reachable. Run after Option A to extend coverage.
 
 ## Project Status
 

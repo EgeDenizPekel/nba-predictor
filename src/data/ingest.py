@@ -4,8 +4,11 @@ NBA data ingestion: fetches raw data from nba_api and caches to CSV.
 Usage:
     python -m src.data.ingest --seasons all
     python -m src.data.ingest --seasons 2022-23
-    python -m src.data.ingest --skip-boxscores
     python -m src.data.ingest --build-game-list-only
+
+Advanced stats (OffRtg, DefRtg, Pace, TS%) are derived in Phase 2 feature
+engineering from the raw columns saved here (FGA, FTA, OREB, etc.), avoiding
+the ~11,000 per-game BoxScoreAdvanced API calls entirely.
 """
 
 import argparse
@@ -14,29 +17,63 @@ import time
 from pathlib import Path
 
 import pandas as pd
-from tqdm import tqdm
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 SEASONS = [
-    "2015-16", "2016-17", "2017-18", "2018-19",
-    "2019-20", "2020-21", "2021-22", "2022-23", "2023-24",
+    "2003-04", "2004-05", "2005-06", "2006-07", "2007-08",
+    "2008-09", "2009-10", "2010-11", "2011-12", "2012-13",
+    "2013-14", "2014-15", "2015-16", "2016-17", "2017-18",
+    "2018-19", "2019-20", "2020-21", "2021-22",
+    # 2022-23 and 2023-24 have incomplete Kaggle coverage; fetch via nba_api when unblocked
 ]
+
+# Kaggle dataset covers 2003-04 through 2021-22 completely.
+# Start year (integer) -> season string mapping for Kaggle SEASON column.
+KAGGLE_SEASON_MAP = {
+    2003: "2003-04", 2004: "2004-05", 2005: "2005-06", 2006: "2006-07",
+    2007: "2007-08", 2008: "2008-09", 2009: "2009-10", 2010: "2010-11",
+    2011: "2011-12", 2012: "2012-13", 2013: "2013-14", 2014: "2014-15",
+    2015: "2015-16", 2016: "2016-17", 2017: "2017-18", 2018: "2018-19",
+    2019: "2019-20", 2020: "2020-21", 2021: "2021-22",
+}
 
 BUBBLE_START = "2020-07-30"
 
-SLEEP_INTERVAL = 0.6   # seconds between API calls
+SLEEP_INTERVAL = 1.0  # seconds between API calls
 MAX_RETRIES = 3
-BACKOFF_FACTOR = 2     # sleeps: 0.6s, 1.2s, 2.4s on successive failures
+BACKOFF_FACTOR = 2    # sleeps: 1.0s, 2.0s, 4.0s on successive failures
+API_TIMEOUT = 300     # seconds - bulk season calls can be slow to respond
+
+# Headers that stats.nba.com expects
+NBA_HEADERS = {
+    "Host": "stats.nba.com",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token": "true",
+    "Connection": "keep-alive",
+    "Referer": "https://stats.nba.com/",
+    "Origin": "https://www.nba.com",
+}
 
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 
 GAMES_DIR = RAW_DIR / "games"
 TEAM_GAMELOGS_DIR = RAW_DIR / "team_gamelogs"
-BOXSCORE_ADV_DIR = RAW_DIR / "boxscore_advanced"
+
+# Columns required in team_gamelogs CSVs. If an existing cache is missing
+# these (e.g. fetched before this column list was expanded), it is re-fetched.
+TEAM_GAMELOGS_REQUIRED_COLS = {"FGA", "FTA", "FGM", "FTM", "OREB", "MIN"}
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -55,7 +92,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _ensure_dirs() -> None:
-    for d in (GAMES_DIR, TEAM_GAMELOGS_DIR, BOXSCORE_ADV_DIR, PROCESSED_DIR):
+    for d in (GAMES_DIR, TEAM_GAMELOGS_DIR, PROCESSED_DIR):
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -101,6 +138,8 @@ def fetch_games(season: str) -> pd.DataFrame:
             season_nullable=season,
             league_id_nullable="00",         # NBA
             season_type_nullable="Regular Season",
+            headers=NBA_HEADERS,
+            timeout=API_TIMEOUT,
         )
         return finder.get_data_frames()[0]
 
@@ -123,12 +162,22 @@ def fetch_games(season: str) -> pd.DataFrame:
 def fetch_team_gamelogs(season: str) -> pd.DataFrame:
     """
     Fetch team game logs for a season via TeamGameLogs.
-    Columns: TEAM_ID, GAME_ID, GAME_DATE, FG_PCT, FG3_PCT, REB, AST, TOV, STL, BLK, PTS, PLUS_MINUS
+
+    Saves raw counting stats needed to derive OffRtg, DefRtg, Pace, and TS%
+    during Phase 2 feature engineering, avoiding per-game API calls.
+
+    Columns: TEAM_ID, GAME_ID, GAME_DATE, MIN,
+             FGM, FGA, FG_PCT, FG3M, FG3A, FG3_PCT, FTM, FTA, FT_PCT,
+             OREB, DREB, REB, AST, TOV, STL, BLK, PTS, PLUS_MINUS
     """
     cache_path = TEAM_GAMELOGS_DIR / f"team_gamelogs_{season}.csv"
     if cache_path.exists():
-        log.info("team_gamelogs %s: cache hit, skipping", season)
-        return pd.read_csv(cache_path, dtype={"GAME_ID": str})
+        existing = pd.read_csv(cache_path, dtype={"GAME_ID": str})
+        if TEAM_GAMELOGS_REQUIRED_COLS.issubset(existing.columns):
+            log.info("team_gamelogs %s: cache hit, skipping", season)
+            return existing
+        log.info("team_gamelogs %s: cache missing columns, re-fetching", season)
+        cache_path.unlink()
 
     from nba_api.stats.endpoints import TeamGameLogs
 
@@ -139,6 +188,8 @@ def fetch_team_gamelogs(season: str) -> pd.DataFrame:
             season_nullable=season,
             league_id_nullable="00",
             season_type_nullable="Regular Season",
+            headers=NBA_HEADERS,
+            timeout=API_TIMEOUT,
         )
         return logs.get_data_frames()[0]
 
@@ -146,8 +197,12 @@ def fetch_team_gamelogs(season: str) -> pd.DataFrame:
     time.sleep(SLEEP_INTERVAL)
 
     keep = [
-        "TEAM_ID", "GAME_ID", "GAME_DATE",
-        "FG_PCT", "FG3_PCT", "REB", "AST", "TOV", "STL", "BLK", "PTS", "PLUS_MINUS",
+        "TEAM_ID", "GAME_ID", "GAME_DATE", "MIN",
+        "FGM", "FGA", "FG_PCT",
+        "FG3M", "FG3A", "FG3_PCT",
+        "FTM", "FTA", "FT_PCT",
+        "OREB", "DREB", "REB",
+        "AST", "TOV", "STL", "BLK", "PTS", "PLUS_MINUS",
     ]
     available = [c for c in keep if c in df.columns]
     df = df[available].copy()
@@ -159,73 +214,124 @@ def fetch_team_gamelogs(season: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Fetch: BoxScoreAdvancedV2 (slow - one call per game)
+# Kaggle adapter: build team_gamelogs from Nathan Lauga's NBA Games dataset
 # ---------------------------------------------------------------------------
 
-def fetch_boxscore_advanced(season: str, game_ids: list[str]) -> pd.DataFrame:
+def _parse_min(value) -> float:
+    """Convert player MIN from 'MM:SS' string to decimal minutes."""
+    if pd.isna(value) or value == "":
+        return 0.0
+    try:
+        s = str(value)
+        if ":" in s:
+            parts = s.split(":")
+            return float(parts[0]) + float(parts[1]) / 60
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def build_team_gamelogs_from_kaggle(
+    details_path: str = "data/games_details.csv",
+) -> None:
     """
-    Fetch team-level advanced box scores for every game in game_ids.
-    Appends to cache CSV after each successful fetch (checkpointing).
-    Returns the full season dataframe (previously cached + newly fetched).
-    Columns: GAME_ID, TEAM_ID, OFF_RATING, DEF_RATING, PACE, TS_PCT, AST_PCT, REB_PCT
+    Build team_gamelogs_{season}.csv files from Kaggle's NBA Games dataset
+    (Nathan Lauga) instead of the nba_api TeamGameLogs endpoint.
+
+    Aggregates player-level box scores to team level and joins GAME_DATE from
+    our cached LeagueGameFinder CSVs, which serve as the authoritative list of
+    regular-season game IDs (filtering out playoffs automatically).
+
+    Skips seasons where Kaggle coverage is below 95% of expected game count.
+
+    Kaggle dataset: https://www.kaggle.com/datasets/nathanlauga/nba-games
+    Expected file:  data/games_details.csv
     """
-    from nba_api.stats.endpoints import BoxScoreAdvancedV3
+    log.info("Loading %s ...", details_path)
+    details = pd.read_csv(details_path, low_memory=False)
 
-    # V3 uses camelCase columns; map to the uppercase names used downstream
-    V3_RENAME = {
-        "gameId": "GAME_ID",
-        "teamId": "TEAM_ID",
-        "offensiveRating": "OFF_RATING",
-        "defensiveRating": "DEF_RATING",
-        "pace": "PACE",
-        "trueShootingPercentage": "TS_PCT",
-        "assistPercentage": "AST_PCT",
-        "reboundPercentage": "REB_PCT",
-    }
+    details["MIN_dec"] = details["MIN"].apply(_parse_min)
 
-    cache_path = BOXSCORE_ADV_DIR / f"boxscore_advanced_{season}.csv"
-
-    # Load existing progress
-    fetched_ids: set[str] = set()
-    if cache_path.exists():
-        existing = pd.read_csv(cache_path, dtype={"GAME_ID": str})
-        fetched_ids = set(existing["GAME_ID"].unique())
-        log.info(
-            "boxscore_advanced %s: resuming - %d/%d games already cached",
-            season, len(fetched_ids), len(game_ids),
+    log.info("Aggregating %d player rows to team level ...", len(details))
+    agg = (
+        details.groupby(["GAME_ID", "TEAM_ID", "TEAM_ABBREVIATION"], as_index=False)
+        .agg(
+            MIN=("MIN_dec", "sum"),
+            FGM=("FGM", "sum"),
+            FGA=("FGA", "sum"),
+            FG3M=("FG3M", "sum"),
+            FG3A=("FG3A", "sum"),
+            FTM=("FTM", "sum"),
+            FTA=("FTA", "sum"),
+            OREB=("OREB", "sum"),
+            DREB=("DREB", "sum"),
+            REB=("REB", "sum"),
+            AST=("AST", "sum"),
+            TOV=("TO", "sum"),
+            STL=("STL", "sum"),
+            BLK=("BLK", "sum"),
+            PTS=("PTS", "sum"),
         )
+    )
 
-    remaining = [g for g in game_ids if g not in fetched_ids]
-    if not remaining:
-        log.info("boxscore_advanced %s: all games cached, skipping", season)
-        return pd.read_csv(cache_path, dtype={"GAME_ID": str})
+    agg["FG_PCT"]  = (agg["FGM"]  / agg["FGA"] .replace(0, float("nan"))).round(3)
+    agg["FG3_PCT"] = (agg["FG3M"] / agg["FG3A"].replace(0, float("nan"))).round(3)
+    agg["FT_PCT"]  = (agg["FTM"]  / agg["FTA"] .replace(0, float("nan"))).round(3)
 
-    log.info("boxscore_advanced %s: fetching %d games...", season, len(remaining))
+    # Pad to 10-digit format to match our LeagueGameFinder GAME_IDs
+    agg["GAME_ID"] = agg["GAME_ID"].astype(str).str.zfill(10)
 
-    write_header = not cache_path.exists()
+    log.info("Aggregated to %d team-game rows", len(agg))
 
-    for game_id in tqdm(remaining, desc=f"boxscore_adv {season}", unit="game"):
-        def _fetch(gid=game_id):
-            bs = BoxScoreAdvancedV3(game_id=gid)
-            team_df = bs.team_stats.get_data_frame()
-            return team_df
+    col_order = [
+        "TEAM_ID", "GAME_ID", "GAME_DATE", "TEAM_ABBREVIATION", "MIN",
+        "FGM", "FGA", "FG_PCT", "FG3M", "FG3A", "FG3_PCT",
+        "FTM", "FTA", "FT_PCT", "OREB", "DREB", "REB",
+        "AST", "TOV", "STL", "BLK", "PTS",
+    ]
 
-        try:
-            team_df = _retry_call(_fetch, game_id=game_id)
-        except Exception:
-            log.error("Skipping game_id=%s after all retries exhausted", game_id)
-            time.sleep(SLEEP_INTERVAL)
+    for season in SEASONS:
+        cache_path = TEAM_GAMELOGS_DIR / f"team_gamelogs_{season}.csv"
+        if cache_path.exists():
+            existing = pd.read_csv(cache_path, dtype={"GAME_ID": str})
+            if TEAM_GAMELOGS_REQUIRED_COLS.issubset(existing.columns):
+                log.info("team_gamelogs %s: cache hit, skipping", season)
+                continue
+
+        games_csv = GAMES_DIR / f"games_{season}.csv"
+        if not games_csv.exists():
+            log.warning("team_gamelogs %s: no games CSV found, skipping", season)
             continue
 
-        row = team_df[list(V3_RENAME.keys())].rename(columns=V3_RENAME).copy()
+        our_games = pd.read_csv(games_csv, dtype={"GAME_ID": str})
+        season_ids = set(our_games["GAME_ID"].unique())
+        game_dates = our_games[["GAME_ID", "GAME_DATE"]].drop_duplicates()
 
-        # Append to CSV immediately (checkpointing)
-        row.to_csv(cache_path, mode="a", header=write_header, index=False)
-        write_header = False
+        season_data = agg[agg["GAME_ID"].isin(season_ids)].copy()
 
-        time.sleep(SLEEP_INTERVAL)
+        coverage = season_data["GAME_ID"].nunique()
+        expected = len(season_ids)
+        pct = coverage / expected * 100
 
-    return pd.read_csv(cache_path, dtype={"GAME_ID": str})
+        if coverage == 0:
+            log.warning("team_gamelogs %s: no Kaggle data found, skipping", season)
+            continue
+        if pct < 95:
+            log.warning(
+                "team_gamelogs %s: partial Kaggle coverage %.0f%% (%d/%d games), skipping",
+                season, pct, coverage, expected,
+            )
+            continue
+
+        season_data = season_data.merge(game_dates, on="GAME_ID", how="left")
+        season_data = season_data[[c for c in col_order if c in season_data.columns]]
+        season_data = season_data.sort_values(["GAME_DATE", "GAME_ID"]).reset_index(drop=True)
+
+        season_data.to_csv(cache_path, index=False)
+        log.info(
+            "team_gamelogs %s: saved %d rows (%.0f%% coverage) -> %s",
+            season, len(season_data), pct, cache_path,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +446,12 @@ def _parse_args() -> argparse.Namespace:
         help='Comma-separated seasons (e.g. "2022-23,2023-24") or "all"',
     )
     parser.add_argument(
-        "--skip-boxscores",
+        "--from-kaggle",
         action="store_true",
-        help="Skip the slow BoxScoreAdvancedV2 step",
+        help=(
+            "Build team_gamelogs from local Kaggle CSV (data/games_details.csv) "
+            "instead of fetching from nba_api. Games CSVs are still fetched via API."
+        ),
     )
     parser.add_argument(
         "--build-game-list-only",
@@ -370,38 +479,34 @@ def main() -> None:
 
     log.info("Processing seasons: %s", seasons)
 
-    # Step 1: LeagueGameFinder (fast)
+    # Step 1: LeagueGameFinder - fetch games CSVs for all seasons
+    # These are the authoritative game ID lists; Kaggle path still needs them.
     for season in seasons:
-        fetch_games(season)
+        try:
+            fetch_games(season)
+        except Exception as exc:
+            log.error("games %s: failed - %s", season, exc)
 
-    # Step 2: TeamGameLogs (fast)
-    for season in seasons:
-        fetch_team_gamelogs(season)
-
-    # Step 3: BoxScoreAdvancedV2 (slow)
-    if not args.skip_boxscores:
+    # Step 2: Team game logs
+    if args.from_kaggle:
+        build_team_gamelogs_from_kaggle()
+    else:
+        failed_seasons = []
         for season in seasons:
-            games_path = GAMES_DIR / f"games_{season}.csv"
-            if not games_path.exists():
-                log.warning("No games file for %s, skipping boxscores", season)
-                continue
-            games_df = pd.read_csv(games_path, dtype={"GAME_ID": str})
-            # Deduplicate: each game appears twice (one row per team)
-            game_ids = games_df["GAME_ID"].unique().tolist()
-            fetch_boxscore_advanced(season, game_ids)
-    else:
-        log.info("--skip-boxscores set, skipping BoxScoreAdvancedV2")
+            try:
+                fetch_team_gamelogs(season)
+            except Exception as exc:
+                log.error("team_gamelogs %s: failed - %s", season, exc)
+                failed_seasons.append(season)
+        if failed_seasons:
+            log.warning(
+                "Could not fetch team_gamelogs for: %s. "
+                "Likely rate-limited. Re-run with --from-kaggle or wait and retry.",
+                failed_seasons,
+            )
 
-    # Step 4: Build game_list.csv from all fetched seasons
-    # Only build if all requested seasons are available
-    available = [s for s in seasons if (GAMES_DIR / f"games_{s}.csv").exists()]
-    if set(available) == set(seasons):
-        build_game_list()
-    else:
-        log.warning(
-            "Some seasons missing from cache, skipping game_list build. "
-            "Run --build-game-list-only when all seasons are fetched."
-        )
+    # Step 3: Build game_list.csv from all seasons that have a games CSV
+    build_game_list()
 
 
 if __name__ == "__main__":

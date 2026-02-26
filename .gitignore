@@ -2,9 +2,10 @@
 CLAUDE.md
 agent.instructions.md
 
-# Data - raw API cache and processed outputs are large/regeneratable
+# Data - raw API cache, processed outputs, and source datasets are large/regeneratable
 data/raw/
 data/processed/
+data/*.csv
 
 # ML artifacts
 mlruns/
