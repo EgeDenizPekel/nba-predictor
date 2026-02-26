@@ -1,0 +1,44 @@
+# Project meta files (Claude/agent context)
+CLAUDE.md
+agent.instructions.md
+
+# Data - raw API cache and processed outputs are large/regeneratable
+data/raw/
+data/processed/
+
+# ML artifacts
+mlruns/
+models/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+project-plan-nba-predictor.md
