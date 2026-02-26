@@ -8,15 +8,18 @@ Binary classification of NBA home team win/loss. The emphasis is on DS and ML ri
 - Model selection on Brier score (calibration matters more than raw accuracy)
 - SHAP-based interpretability with feature ablation to quantify each group's contribution
 - COVID data handling as a first-class problem, not an afterthought
+- Era drift analysis - empirically determining how far back training data improves vs. hurts generalization
 - Quantified limitation analysis - systematic error on games with absent star players
 
 ## Architecture
 
 ```
-nba_api
+Kaggle NBA Games dataset (self-contained, 19 seasons)
    |
    v
-Data Ingestion (cached CSVs, rate-limited, ~3hr wall-clock)
+Data Ingestion (src/data/ingest.py)
+  - Aggregate player-level box scores to team level
+  - Build game index from games.csv (regular season filter via GAME_ID)
    |
    v
 Feature Engineering (leakage-free rolling stats, .shift(1) discipline)
@@ -28,7 +31,7 @@ MLflow Experiment Tracking
    |
    v
 FastAPI
-  /predict/upcoming     - live schedule + predictions (6hr TTL cache)
+  /predict/upcoming     - live schedule + predictions (6hr TTL cache via nba_api)
   /predict/game/{id}
   /teams/{team_id}/stats
   /analysis/feature-importance
@@ -40,9 +43,13 @@ React Dashboard
 
 ## Data
 
-9 seasons: 2015-16 through 2023-24. ~11,000 regular season games.
+**Source:** [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) (Kaggle). Fully self-contained - no API calls needed for the training pipeline.
 
-**Chronological split:** train 2015-2021, validate 2022, test 2023-2024.
+**Why Kaggle instead of nba_api:** The initial design used `nba_api` (stats.nba.com) for bulk historical data ingestion. In practice, stats.nba.com aggressively rate-limits and times out on sustained bulk requests - after several hours of retries and circuit breaker logic, the endpoint remained blocked. The Kaggle dataset turned out to be a better fit anyway: it covers 19 complete seasons with no rate limiting, and the player-level box scores allow us to derive advanced metrics (OffRtg, DefRtg, Pace) from raw counts rather than making ~11,000 per-game API calls. `nba_api` is still used in the FastAPI layer for live upcoming game schedule queries, where single-call latency is acceptable.
+
+**Coverage:** 2003-04 through 2021-22 - 19 seasons, 22,796 regular season games.
+
+**Chronological split:** determined empirically via model drift analysis. Training window start year is chosen based on where older data stops improving generalization on recent seasons. Validate and test sets use the most recent complete seasons.
 
 **COVID handling:**
 - 2019-20 bubble games (July-Oct 2020): excluded from training. Home/away designations are meaningless at a neutral site. Used separately to empirically measure the home advantage effect.
@@ -55,19 +62,21 @@ All features are computed from data available before tip-off. No game-day stats.
 | Group | Features |
 |---|---|
 | Recent form | Win% over last 5, 10, 20 games (rolling, per team) |
-| Offensive efficiency | OffRtg rolling avg (last 10 games) |
-| Defensive efficiency | DefRtg rolling avg (last 10 games) |
-| Pace | Possessions per game (last 10) |
+| Offensive efficiency | OffRtg rolling avg (last 10 games) - derived from raw counts |
+| Defensive efficiency | DefRtg rolling avg (last 10 games) - derived from raw counts |
+| Pace | Possessions per game (last 10) - derived from raw counts |
 | Rest | Days since last game, back-to-back flag |
 | Home/away splits | Team's home win% vs away win% this season |
 | Standing | Current season win% |
 | Streak | Signed integer (+N win, -N losing) |
 | Context | `is_early_season`, `is_no_fans_season` |
 
+OffRtg, DefRtg, Pace, and TS% are derived during feature engineering from raw counting stats (FGA, FTA, OREB, TOV) rather than fetched from a separate API endpoint.
+
 **Deliberately excluded:**
 - Net Rating: derived from OffRtg - DefRtg, causes multicollinearity in LR
 - H2H record: 2-4 games per season is noise
-- Injury data: pre-game availability is unreliable from nba_api (documented as primary limitation)
+- Injury data: pre-game availability is unreliable (documented as primary limitation)
 
 ## Models
 
@@ -82,11 +91,11 @@ All features are computed from data available before tip-off. No game-day stats.
 
 ## Analytical Findings
 
-1. **Home advantage post-COVID** - season-by-season home win% from 2015-2024 with COVID seasons annotated
-2. **The no-fans effect** - SHAP contribution of `is_no_fans_season`: what does removing the crowd actually do to home advantage?
-3. **Back-to-back penalty** - how much does B2B status drop predicted win probability, controlling for team quality?
-4. **Feature importance via SHAP** - not built-in importance; directional effects and interaction terms
-5. **Model drift** - does a 2015-trained model degrade on 2024 games?
+1. **Era drift** - does including 2003-2010 data help or hurt predictions on 2018+ games? Rolling window training answers this empirically and justifies the training cutoff.
+2. **Home advantage post-COVID** - season-by-season home win% across all seasons with COVID annotations
+3. **The no-fans effect** - SHAP contribution of `is_no_fans_season`: what does removing the crowd actually do to home advantage?
+4. **Back-to-back penalty** - how much does B2B status drop predicted win probability, controlling for team quality?
+5. **Feature importance via SHAP** - not built-in importance; directional effects and interaction terms
 6. **Where the model fails** - error analysis on games with absent star players (20+ PPG)
 
 ## Setup
@@ -95,24 +104,22 @@ All features are computed from data available before tip-off. No game-day stats.
 pip install -r requirements.txt
 ```
 
-### Data sources
+### Data
 
 All raw data is gitignored (large, regeneratable).
 
-**Option A - Kaggle dataset (recommended, no API issues):**
 1. Download the [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) from Kaggle
-2. Place `games_details.csv` and `games.csv` in `data/`
+2. Place `games_details.csv`, `games.csv`, and `teams.csv` in `data/`
 3. Run ingestion:
 ```bash
-python -m src.data.ingest --from-kaggle
+python -m src.data.ingest
 ```
-Covers 2003-04 through 2021-22 (19 complete seasons).
 
-**Option B - nba_api (adds 2022-23 and 2023-24):**
+Covers 2003-04 through 2021-22 (19 seasons, 22,796 games).
+
 ```bash
-python -m src.data.ingest --seasons 2022-23,2023-24
+python -m src.data.ingest --build-game-list-only   # rebuild game_list.csv without re-aggregating
 ```
-Requires stats.nba.com to be reachable. Run after Option A to extend coverage.
 
 ## Project Status
 
