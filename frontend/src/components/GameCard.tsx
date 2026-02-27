@@ -3,10 +3,11 @@ import type { GameSummary } from '../types';
 interface Props {
   game: GameSummary;
   isSelected: boolean;
+  noSpoiler?: boolean;
   onClick: () => void;
 }
 
-export default function GameCard({ game, isSelected, onClick }: Props) {
+export default function GameCard({ game, isSelected, noSpoiler = false, onClick }: Props) {
   const prob = game.home_win_prob;
   const homeWon = game.home_win === 1;
   const correct = (prob >= 0.5 && homeWon) || (prob < 0.5 && !homeWon);
@@ -14,6 +15,8 @@ export default function GameCard({ game, isSelected, onClick }: Props) {
 
   const borderColor = isSelected
     ? 'border-blue-500'
+    : noSpoiler
+    ? 'border-gray-200'
     : confident && correct
     ? 'border-green-400'
     : confident && !correct
@@ -49,12 +52,12 @@ export default function GameCard({ game, isSelected, onClick }: Props) {
       className={`w-full text-left border-2 rounded-lg px-3 py-2 bg-white hover:bg-gray-50 transition-colors ${borderColor}`}
     >
       <div className="flex items-center gap-2">
-        {/* Teams */}
+        {/* Teams — both neutral weight in no-spoiler mode */}
         <div className="w-10 shrink-0">
-          <div className={`text-xs font-bold leading-tight ${homeWon ? 'text-gray-800' : 'text-gray-400'}`}>
+          <div className={`text-xs font-bold leading-tight ${!noSpoiler && homeWon ? 'text-gray-800' : noSpoiler ? 'text-gray-700' : 'text-gray-400'}`}>
             {game.home_team_abbr}
           </div>
-          <div className={`text-xs font-bold leading-tight ${!homeWon ? 'text-gray-800' : 'text-gray-400'}`}>
+          <div className={`text-xs font-bold leading-tight ${!noSpoiler && !homeWon ? 'text-gray-800' : noSpoiler ? 'text-gray-700' : 'text-gray-400'}`}>
             {game.away_team_abbr}
           </div>
         </div>
@@ -73,8 +76,8 @@ export default function GameCard({ game, isSelected, onClick }: Props) {
           {(prob * 100).toFixed(0)}%
         </div>
 
-        {/* Outcome icon */}
-        {outcomeIcon}
+        {/* Outcome icon — hidden in no-spoiler mode */}
+        {!noSpoiler && outcomeIcon}
       </div>
 
       {game.is_bubble_game === 1 && (

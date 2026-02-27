@@ -27,7 +27,11 @@ function classifyGame(game: GameSummary): 'correct' | 'wrong' | 'uncertain' {
   return correct ? 'correct' : 'wrong';
 }
 
-export default function GamesTab() {
+interface Props {
+  noSpoiler?: boolean;
+}
+
+export default function GamesTab({ noSpoiler = false }: Props) {
   const [date, setDate] = useState(DEFAULT_DATE);
   const [games, setGames] = useState<GameSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -46,6 +50,13 @@ export default function GamesTab() {
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false));
   }, [date]);
+
+  // When no-spoiler turns on, reset any outcome-revealing filter
+  useEffect(() => {
+    if (noSpoiler && filter !== 'all' && filter !== 'uncertain') {
+      setFilter('all');
+    }
+  }, [noSpoiler]);
 
   const visibleGames =
     filter === 'all'
@@ -147,27 +158,31 @@ export default function GamesTab() {
           </div>
         </div>
 
-        {/* Filter pills */}
+        {/* Filter pills — outcome-revealing filters hidden in no-spoiler mode */}
         {games.length > 0 && (
           <div className="flex gap-1 px-3 py-2 border-b border-gray-100 shrink-0">
-            {FILTERS.map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => {
-                  setFilter(key);
-                  setSelectedId(null);
-                }}
-                className={`flex-1 text-xs py-1 rounded-full border transition-colors ${
-                  filter === key
-                    ? key === 'wrong' || key === 'high-conf-wrong'
-                      ? 'bg-red-600 text-white border-red-600'
-                      : 'bg-gray-800 text-white border-gray-800'
-                    : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+            {FILTERS
+              .filter(({ key }) =>
+                noSpoiler ? key === 'all' || key === 'uncertain' : true,
+              )
+              .map(({ key, label }) => (
+                <button
+                  key={key}
+                  onClick={() => {
+                    setFilter(key);
+                    setSelectedId(null);
+                  }}
+                  className={`flex-1 text-xs py-1 rounded-full border transition-colors ${
+                    filter === key
+                      ? key === 'wrong' || key === 'high-conf-wrong'
+                        ? 'bg-red-600 text-white border-red-600'
+                        : 'bg-gray-800 text-white border-gray-800'
+                      : 'bg-white text-gray-500 border-gray-200 hover:border-gray-400'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
           </div>
         )}
 
@@ -195,6 +210,7 @@ export default function GamesTab() {
                 key={game.game_id}
                 game={game}
                 isSelected={game.game_id === selectedId}
+                noSpoiler={noSpoiler}
                 onClick={() =>
                   setSelectedId(game.game_id === selectedId ? null : game.game_id)
                 }
@@ -224,29 +240,41 @@ export default function GamesTab() {
                 <span className="text-sm text-gray-400 self-end pb-0.5">P(Home Win)</span>
               </div>
 
-              {/* Outcome */}
-              <div className="flex items-center gap-2 mb-2">
-                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide w-24 shrink-0">Outcome</span>
-                {selectedGame.home_pts !== null ? (
-                  <span className="text-sm text-gray-700 font-medium">
-                    {selectedGame.home_pts.toFixed(0)}–{selectedGame.away_pts!.toFixed(0)}
-                    <span className="text-gray-400 mx-1">·</span>
-                    {selectedGame.home_win
-                      ? `${selectedGame.home_team_abbr} won`
-                      : `${selectedGame.away_team_abbr} won`}
-                    <span className="text-gray-400 mx-1">·</span>
-                    {selectedGame.season}
-                  </span>
-                ) : (
-                  <span className="text-sm text-gray-400">No result · {selectedGame.season}</span>
-                )}
-              </div>
+              {/* Outcome — hidden in no-spoiler mode */}
+              {!noSpoiler && (
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide w-24 shrink-0">Outcome</span>
+                  {selectedGame.home_pts !== null ? (
+                    <span className="text-sm text-gray-700 font-medium">
+                      {selectedGame.home_pts.toFixed(0)}–{selectedGame.away_pts!.toFixed(0)}
+                      <span className="text-gray-400 mx-1">·</span>
+                      {selectedGame.home_win
+                        ? `${selectedGame.home_team_abbr} won`
+                        : `${selectedGame.away_team_abbr} won`}
+                      <span className="text-gray-400 mx-1">·</span>
+                      {selectedGame.season}
+                    </span>
+                  ) : (
+                    <span className="text-sm text-gray-400">No result · {selectedGame.season}</span>
+                  )}
+                </div>
+              )}
 
-              {/* Evaluation */}
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide w-24 shrink-0">Evaluation</span>
-                {evalBadge}
-              </div>
+              {/* Evaluation — hidden in no-spoiler mode */}
+              {!noSpoiler && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide w-24 shrink-0">Evaluation</span>
+                  {evalBadge}
+                </div>
+              )}
+
+              {/* No-spoiler season label replaces outcome row */}
+              {noSpoiler && (
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide w-24 shrink-0">Season</span>
+                  <span className="text-sm text-gray-500">{selectedGame.season}</span>
+                </div>
+              )}
             </div>
 
             <GameDetail
