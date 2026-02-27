@@ -21,6 +21,7 @@ class AppState:
     pipeline: Pipeline
     shap_importance: list[dict]
     home_advantage: list[dict]
+    calibration: list[dict]
 
 
 def get_state(request: Request) -> AppState:

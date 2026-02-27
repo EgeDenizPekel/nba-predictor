@@ -47,10 +47,11 @@ class GameSummary(BaseModel):
 
 
 class GameDetail(GameSummary):
-    """Single game with full feature breakdown for both teams."""
+    """Single game with full feature breakdown and per-feature SHAP contributions."""
 
     home_features: TeamFeatures
     away_features: TeamFeatures
+    shap_values: dict[str, float]  # feature_name -> SHAP value (positive = toward home win)
 
 
 class TeamStats(BaseModel):
@@ -82,3 +83,13 @@ class SeasonInfo(BaseModel):
     min_date: str
     max_date: str
     n_games: int
+
+
+class CalibrationItem(BaseModel):
+    """One confidence bucket with historical accuracy from the test set."""
+
+    bucket: str   # e.g. "60-70%"
+    lo: float     # lower bound (inclusive)
+    hi: float     # upper bound (exclusive, except last bucket = 1.0)
+    n_games: int
+    accuracy: float  # fraction of games where the predicted side actually won

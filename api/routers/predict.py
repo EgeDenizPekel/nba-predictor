@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from datetime import date as date_type
 
+import numpy as np
+import xgboost as xgb
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.dependencies import AppState, get_state
@@ -80,6 +82,17 @@ def _extract_team_features(row: dict, prefix: str) -> TeamFeatures:
     )
 
 
+def _compute_game_shap(pipeline, feat_row) -> dict[str, float]:
+    """Compute per-feature SHAP values for a single game row using native XGBoost."""
+    preproc = pipeline[:-1]
+    X_transformed = preproc.transform(feat_row[FEATURE_COLS])
+    booster = pipeline.named_steps["model"].get_booster()
+    dmatrix = xgb.DMatrix(X_transformed)
+    # pred_contribs: (1, n_features + 1) - last col is bias term
+    shap_matrix = booster.predict(dmatrix, pred_contribs=True)
+    return {f: float(v) for f, v in zip(FEATURE_COLS, shap_matrix[0, :-1])}
+
+
 @router.get("/games", response_model=list[GameSummary])
 async def predict_games(
     date: date_type,
@@ -144,6 +157,7 @@ async def predict_game(
         raise HTTPException(status_code=404, detail=f"Game {game_id!r} not found in game list")
 
     prob = float(predict_proba(state.pipeline, feat_row)[0])
+    shap_values = _compute_game_shap(state.pipeline, feat_row)
     # Merge both rows into a single dict; features_df values override on key collision
     row = {**gl_row.iloc[0].to_dict(), **feat_row.iloc[0].to_dict()}
 
@@ -163,4 +177,5 @@ async def predict_game(
         is_no_fans_season=int(row.get("is_no_fans_season", 0)),
         home_features=_extract_team_features(row, "home_"),
         away_features=_extract_team_features(row, "away_"),
+        shap_values=shap_values,
     )

@@ -34,7 +34,7 @@ from api.routers import teams as teams_router_module
 import xgboost as xgb
 
 from src.analysis.insights import home_advantage_trend
-from src.models.predict import load_best_pipeline
+from src.models.predict import load_best_pipeline, predict_proba
 from src.models.train import FEATURE_COLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -94,6 +94,48 @@ def _compute_shap_importance(pipeline, features_df: pd.DataFrame) -> list[dict]:
     ]
 
 
+def _compute_calibration(pipeline, features_df: pd.DataFrame) -> list[dict]:
+    """
+    Compute prediction accuracy bucketed by confidence level on the test set.
+
+    Uses symmetric folding: confidence = max(prob, 1-prob), so each game
+    is classified by how decisive the model was, regardless of direction.
+    Accuracy is the fraction of games where the model's favored side won.
+    """
+    test = features_df[
+        features_df["SEASON"].isin({"2020-21", "2021-22"})
+        & (features_df["is_bubble_game"] != 1)
+    ]
+    probs = predict_proba(pipeline, test)
+    y = test["HOME_WIN"].values
+
+    confidence = np.maximum(probs, 1 - probs)
+    # 1 if the side the model favored actually won
+    predicted_correct = np.where(probs >= 0.5, y, 1 - y).astype(float)
+
+    buckets = [
+        (0.50, 0.60, "50-60%"),
+        (0.60, 0.70, "60-70%"),
+        (0.70, 0.80, "70-80%"),
+        (0.80, 1.01, "80%+"),
+    ]
+    result = []
+    for lo, hi, label in buckets:
+        mask = (confidence >= lo) & (confidence < hi)
+        n = int(mask.sum())
+        if n > 0:
+            result.append(
+                {
+                    "bucket": label,
+                    "lo": lo,
+                    "hi": hi,
+                    "n_games": n,
+                    "accuracy": float(predicted_correct[mask].mean()),
+                }
+            )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -118,12 +160,16 @@ async def lifespan(app: FastAPI):
     home_adv = home_advantage_trend(features_df).to_dict("records")
     logger.info(f"Computed home advantage trend: {len(home_adv)} seasons")
 
+    calibration = _compute_calibration(pipeline, features_df)
+    logger.info(f"Computed calibration: {len(calibration)} confidence buckets")
+
     app.state.app_state = AppState(
         features_df=features_df,
         game_list_df=game_list_df,
         pipeline=pipeline,
         shap_importance=shap_importance,
         home_advantage=home_adv,
+        calibration=calibration,
     )
 
     logger.info("Startup complete.")

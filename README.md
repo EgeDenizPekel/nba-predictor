@@ -120,6 +120,25 @@ Results from `notebooks/04_insights.ipynb`:
 5. **Feature importance via SHAP** - not built-in importance; directional effects showing which of the 29 features actually drives predictions
 6. **Where the model fails** - error analysis on high-uncertainty predictions; primary structural gap is injury data
 
+## Limitations
+
+These are structural gaps in the model, not oversights. Each is documented here because understanding where a model fails is as important as knowing where it succeeds.
+
+**Injury and availability data (primary gap)**
+The model has no knowledge of who is playing. When a star player sits out - whether for load management, injury, or DNP-CD - the rolling team stats look the same as if they were playing. This is the largest single source of systematic error. Games where a top-5 player is unexpectedly absent show significantly higher prediction error. The dataset (Kaggle box scores) does not include pre-game availability reports, and building that would require a separate data source (e.g. NBA injury reports or Vegas line movement as a proxy).
+
+**Late-season motivation**
+Rolling win% doesn't distinguish between a team that is bad and a team that is intentionally losing to improve draft position (tanking), or resting starters ahead of the playoffs. Both look like poor recent form. The model will underestimate teams going through deliberate load management stretches.
+
+**Roster discontinuity from trades**
+A mid-season blockbuster trade changes team quality overnight, but the rolling windows (L5, L10, L20) take several games to reflect the new reality. In the week or two after a major trade the model's features are stale by construction.
+
+**Early-season cold start**
+The `is_early_season` flag covers the first 15 games, but rolling windows are still thin in games 1-5. Win% over the last 5 games with only 3 observations is noisy regardless of flagging. Teams with significant roster turnover (free agency, draft) are essentially unknown quantities until mid-November.
+
+**AUC ceiling around 0.70**
+NBA game outcomes have high inherent variance. Even with perfect pre-game information, single-game prediction is hard - a starter rolling an ankle in warmups, an officiating crew with unusual tendencies, or a cold-shooting night from a normally elite scorer are all unforeseeable. Professional sportsbooks with access to injury reports, line movement, and sharp money barely exceed 0.72 AUC over large samples. The gap between this model's 0.70 and the theoretical ceiling is narrow.
+
 ## Setup
 
 ```bash
@@ -169,7 +188,23 @@ python -m src.models.predict --best         # load best model by val Brier, pred
 python -m src.models.predict --run-id <id>  # load a specific MLflow run
 ```
 
-### 5. API
+### 5. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev     # http://localhost:5173
+npm run build   # production build to frontend/dist/
+```
+
+Requires the API server running on port 8000 (configure via `VITE_API_URL` in `frontend/.env`).
+
+**Views:**
+- **Games tab** - fixed left sidebar with a custom calendar (month + year dropdowns, 2003-10-28 to 2022-04-10) and a scrollable game list. Five filter pills: All, Correct, Wrong, Uncertain, and Big Misses (confident wrong - >70% predicted, incorrect). Wrong and Big Misses pills turn red when active. Cards are compact single-row: stacked abbreviations, thin low-contrast probability bar with a 50% midpoint marker, home win%, and an outcome icon. Border colors: green = confident correct, red = confident wrong, grey = low confidence. Clicking a game opens the detail panel.
+- **Detail panel** - structured header with three stacked rows: Prediction (4xl probability + "P(Home Win)" label), Outcome (final score + winner), Evaluation (badge with hover tooltip showing what the model predicted at what confidence vs what actually happened - tooltip uses the predicted team's probability, not the raw home win probability). Two-column layout below: Left: 14 features in five groups with winner shading and hover tooltips; rows where home/away differ by less than 5% of the feature's typical range dim to show only the discriminative features. Right: local SHAP diverging bar chart (top 12 features, blue = pushes home win left, amber = pushes away win right, axis label "Values are additive contributions to the log-odds of home win"), and a Model Confidence Context panel (4 confidence buckets, active bucket highlighted, filled dot on the bar marking the current game's accuracy position).
+- **Analysis tab** - SHAP feature importance (horizontal bar chart, all 29 features) and home advantage trend (line chart, 2003-04 to 2021-22, bubble/no-fans seasons annotated).
+
+### 6. API
 
 ```bash
 uvicorn api.main:app --reload   # start dev server at http://localhost:8000
@@ -199,5 +234,5 @@ pytest tests/test_api.py -v
 - [x] Phase 2 - Feature Engineering
 - [x] Phase 3 - Model Training + Evaluation
 - [x] Phase 4 - FastAPI
-- [ ] Phase 5 - React Dashboard
+- [x] Phase 5 - React Dashboard
 - [ ] Phase 6 - Deploy

@@ -11,7 +11,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from api.dependencies import AppState, get_state
-from api.schemas import FeatureImportanceItem, HomeAdvantageItem, SeasonInfo
+from api.schemas import CalibrationItem, FeatureImportanceItem, HomeAdvantageItem, SeasonInfo
 
 router = APIRouter(tags=["analysis"])
 
@@ -30,6 +30,14 @@ async def home_advantage(
 ) -> list[dict]:
     """Return season-by-season home win rates with bubble/no-fans annotations."""
     return state.home_advantage
+
+
+@router.get("/analysis/calibration", response_model=list[CalibrationItem])
+async def calibration(
+    state: AppState = Depends(get_state),
+) -> list[dict]:
+    """Return model calibration stats bucketed by confidence level (test set: 2020-21 + 2021-22)."""
+    return state.calibration
 
 
 @router.get("/games/seasons", response_model=list[SeasonInfo])
