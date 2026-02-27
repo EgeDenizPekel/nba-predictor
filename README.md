@@ -22,12 +22,15 @@ Data Ingestion (src/data/ingest.py)
   - Build game index from games.csv (regular season filter via GAME_ID)
    |
    v
-Feature Engineering (leakage-free rolling stats, .shift(1) discipline)
+Feature Engineering (src/data/features.py)
+  - Leakage-free rolling stats (.shift(1) discipline)
+  - Derived advanced metrics: OffRtg, DefRtg, Pace, TS%
+  - 29 features: recent form, efficiency, rest, standing, streak, COVID context
    |
    v
-MLflow Experiment Tracking
+MLflow Experiment Tracking (src/models/train.py)
   - Logistic Regression, Random Forest, XGBoost (Optuna-tuned), PyTorch MLP
-  - Full sklearn Pipeline artifacts (preprocessor + model)
+  - Full sklearn Pipeline artifacts (preprocessor + model, no training-serving skew)
    |
    v
 FastAPI
@@ -45,11 +48,16 @@ React Dashboard
 
 **Source:** [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) (Kaggle). Fully self-contained - no API calls needed for the training pipeline.
 
-**Why Kaggle instead of nba_api:** The initial design used `nba_api` (stats.nba.com) for bulk historical data ingestion. In practice, stats.nba.com aggressively rate-limits and times out on sustained bulk requests - after several hours of retries and circuit breaker logic, the endpoint remained blocked. The Kaggle dataset turned out to be a better fit anyway: it covers 19 complete seasons with no rate limiting, and the player-level box scores allow us to derive advanced metrics (OffRtg, DefRtg, Pace) from raw counts rather than making ~11,000 per-game API calls. `nba_api` is still used in the FastAPI layer for live upcoming game schedule queries, where single-call latency is acceptable.
+**Why Kaggle instead of nba_api for historical data:** stats.nba.com aggressively rate-limits sustained bulk requests. The Kaggle dataset covers 19 complete seasons with no rate limiting, and the player-level box scores allow deriving advanced metrics (OffRtg, DefRtg, Pace) from raw counts rather than making ~11,000 per-game API calls. `nba_api` is used only in the FastAPI layer for live upcoming schedule queries.
 
 **Coverage:** 2003-04 through 2021-22 - 19 seasons, 22,796 regular season games.
 
-**Chronological split:** determined empirically via model drift analysis. Training window start year is chosen based on where older data stops improving generalization on recent seasons. Validate and test sets use the most recent complete seasons.
+**Chronological split:**
+- Train: 2003-04 through 2017-18 (15 seasons, ~18,200 rows)
+- Val: 2018-19, 2019-20 pre-bubble (~2,200 rows)
+- Test: 2020-21, 2021-22 (~2,300 rows)
+
+Training window start is confirmed via rolling window drift analysis rather than hardcoded.
 
 **COVID handling:**
 - 2019-20 bubble games (July-Oct 2020): excluded from training. Home/away designations are meaningless at a neutral site. Used separately to empirically measure the home advantage effect.
@@ -57,14 +65,14 @@ React Dashboard
 
 ## Features
 
-All features are computed from data available before tip-off. No game-day stats.
+All 29 features are computed from data available before tip-off. No game-day stats.
 
 | Group | Features |
 |---|---|
 | Recent form | Win% over last 5, 10, 20 games (rolling, per team) |
 | Offensive efficiency | OffRtg rolling avg (last 10 games) - derived from raw counts |
 | Defensive efficiency | DefRtg rolling avg (last 10 games) - derived from raw counts |
-| Pace | Possessions per game (last 10) - derived from raw counts |
+| Pace / shooting | Pace and TS% rolling avg (last 10 games) - derived from raw counts |
 | Rest | Days since last game, back-to-back flag |
 | Home/away splits | Team's home win% vs away win% this season |
 | Standing | Current season win% |
@@ -78,25 +86,38 @@ OffRtg, DefRtg, Pace, and TS% are derived during feature engineering from raw co
 - H2H record: 2-4 games per season is noise
 - Injury data: pre-game availability is unreliable (documented as primary limitation)
 
-## Models
+## Results
 
-| Model | Role |
-|---|---|
-| Logistic Regression | Interpretable baseline; examine coefficients |
-| Random Forest | Ensemble baseline; Gini importance |
-| XGBoost | Primary candidate; Optuna-tuned |
-| PyTorch MLP | Breadth; expected to underperform XGBoost on this data size |
+**Selection criterion:** val Brier score. Calibration matters more than raw accuracy - a well-calibrated 65% model is more useful than a 67% overconfident one.
 
-**Selection criterion:** Brier score. A well-calibrated 65% model is more useful than a 67% overconfident one.
+Baseline Brier score (always predict the mean home win rate): ~0.245
+
+| Model | val Brier | test Brier | val AUC-ROC |
+|---|---|---|---|
+| **XGBoost (Optuna-tuned)** | **0.2145** | **0.2286** | **0.7035** |
+| MLP (PyTorch) | 0.2162 | 0.2264 | 0.6964 |
+| Logistic Regression | 0.2159 | 0.2278 | 0.6986 |
+| Random Forest | 0.2187 | 0.2308 | 0.6891 |
+
+XGBoost selected as the primary model (best val Brier, best val AUC). MLP edges it on test Brier by 0.002 - within noise, and val is the selection criterion.
+
+**XGBoost best hyperparameters (50 Optuna trials):**
+- `n_estimators=708`, `max_depth=3`, `learning_rate=0.0102`
+- `subsample=0.632`, `colsample_bytree=0.798`, `min_child_weight=15`
+- `reg_alpha=1.53`, `reg_lambda=3.88`
+
+The shallow depth (3) and heavy regularization reflect the signal-to-noise characteristics of sports prediction. `max_depth=3` with 708 trees is the classic "many weak learners" pattern emerging naturally from the search.
 
 ## Analytical Findings
 
-1. **Era drift** - does including 2003-2010 data help or hurt predictions on 2018+ games? Rolling window training answers this empirically and justifies the training cutoff.
-2. **Home advantage post-COVID** - season-by-season home win% across all seasons with COVID annotations
+Results from `notebooks/04_insights.ipynb`:
+
+1. **Era drift** - rolling window training reveals whether 2003-2010 data helps or hurts predictions on 2018+ games, empirically justifying the training window start
+2. **Home advantage post-COVID** - season-by-season home win% with COVID bubble and no-fans seasons annotated; pre-2010 rate ~59-61%, post-2018 ~54-55%
 3. **The no-fans effect** - SHAP contribution of `is_no_fans_season`: what does removing the crowd actually do to home advantage?
-4. **Back-to-back penalty** - how much does B2B status drop predicted win probability, controlling for team quality?
-5. **Feature importance via SHAP** - not built-in importance; directional effects and interaction terms
-6. **Where the model fails** - error analysis on games with absent star players (20+ PPG)
+4. **Back-to-back penalty** - conditional win probability by B2B scenario, controlling for rolling team quality
+5. **Feature importance via SHAP** - not built-in importance; directional effects showing which of the 29 features actually drives predictions
+6. **Where the model fails** - error analysis on high-uncertainty predictions; primary structural gap is injury data
 
 ## Setup
 
@@ -104,28 +125,54 @@ OffRtg, DefRtg, Pace, and TS% are derived during feature engineering from raw co
 pip install -r requirements.txt
 ```
 
-### Data
+### 1. Data ingestion
 
-All raw data is gitignored (large, regeneratable).
+Download the [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) from Kaggle. Place `games_details.csv`, `games.csv`, and `teams.csv` in `data/`.
 
-1. Download the [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) from Kaggle
-2. Place `games_details.csv`, `games.csv`, and `teams.csv` in `data/`
-3. Run ingestion:
 ```bash
 python -m src.data.ingest
 ```
 
-Covers 2003-04 through 2021-22 (19 seasons, 22,796 games).
+Produces `data/raw/team_gamelogs/` (19 season files) and `data/processed/game_list.csv` (22,767 games, bubble flags resolved).
+
+### 2. Feature engineering
 
 ```bash
-python -m src.data.ingest --build-game-list-only   # rebuild game_list.csv without re-aggregating
+python -m src.data.features
+```
+
+Produces `data/processed/features.csv` - 22,767 rows x 34 columns, leakage-verified.
+
+```bash
+python -m src.data.features --verify-only   # re-run leakage check on existing file
+```
+
+### 3. Model training
+
+```bash
+python -m src.models.train                  # train all 4 models
+python -m src.models.train --tune-xgb       # run Optuna (50 trials) before training XGBoost
+python -m src.models.train --model xgb      # train a single model
+```
+
+All runs tracked in MLflow. View at `http://localhost:5000` after:
+
+```bash
+mlflow ui
+```
+
+### 4. Inference
+
+```bash
+python -m src.models.predict --best         # load best model by val Brier, predict on test set
+python -m src.models.predict --run-id <id>  # load a specific MLflow run
 ```
 
 ## Project Status
 
 - [x] Phase 1 - Data Ingestion
-- [ ] Phase 2 - Feature Engineering
-- [ ] Phase 3 - Model Training + Evaluation
+- [x] Phase 2 - Feature Engineering
+- [x] Phase 3 - Model Training + Evaluation
 - [ ] Phase 4 - FastAPI
 - [ ] Phase 5 - React Dashboard
 - [ ] Phase 6 - Deploy

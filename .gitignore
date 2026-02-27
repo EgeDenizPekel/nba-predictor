@@ -10,6 +10,7 @@ data/*.csv
 # ML artifacts
 mlruns/
 models/
+mlflow.db
 
 # Python
 __pycache__/
