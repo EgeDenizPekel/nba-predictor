@@ -34,11 +34,12 @@ MLflow Experiment Tracking (src/models/train.py)
    |
    v
 FastAPI
-  /predict/upcoming     - live schedule + predictions (6hr TTL cache via nba_api)
-  /predict/game/{id}
-  /teams/{team_id}/stats
-  /analysis/feature-importance
-  /analysis/home-advantage
+  /predict/games?date=YYYY-MM-DD  - all games on a date with predictions + actuals
+  /predict/game/{game_id}         - single game with full feature breakdown
+  /teams/{team_id}/stats          - most recent rolling stats for a team
+  /analysis/feature-importance    - SHAP-based feature ranking
+  /analysis/home-advantage        - season-by-season home win% with COVID annotations
+  /games/seasons                  - available seasons + date ranges (for UI date picker)
    |
    v
 React Dashboard
@@ -48,7 +49,7 @@ React Dashboard
 
 **Source:** [NBA Games dataset by Nathan Lauga](https://www.kaggle.com/datasets/nathanlauga/nba-games) (Kaggle). Fully self-contained - no API calls needed for the training pipeline.
 
-**Why Kaggle instead of nba_api for historical data:** stats.nba.com aggressively rate-limits sustained bulk requests. The Kaggle dataset covers 19 complete seasons with no rate limiting, and the player-level box scores allow deriving advanced metrics (OffRtg, DefRtg, Pace) from raw counts rather than making ~11,000 per-game API calls. `nba_api` is used only in the FastAPI layer for live upcoming schedule queries.
+**Why Kaggle instead of nba_api:** stats.nba.com aggressively rate-limits sustained bulk requests. The Kaggle dataset covers 19 complete seasons with no rate limiting, and the player-level box scores allow deriving advanced metrics (OffRtg, DefRtg, Pace) from raw counts rather than making ~11,000 per-game API calls. The API serves historical predictions only - no nba_api dependency anywhere in the stack.
 
 **Coverage:** 2003-04 through 2021-22 - 19 seasons, 22,796 regular season games.
 
@@ -168,11 +169,35 @@ python -m src.models.predict --best         # load best model by val Brier, pred
 python -m src.models.predict --run-id <id>  # load a specific MLflow run
 ```
 
+### 5. API
+
+```bash
+uvicorn api.main:app --reload   # start dev server at http://localhost:8000
+```
+
+Startup loads features.csv, game_list.csv, and the best MLflow pipeline into memory (~1s). SHAP importance is pre-computed on 2000 test-season rows at startup.
+
+```bash
+# Smoke test endpoints
+curl "http://localhost:8000/predict/games?date=2021-11-15"
+curl "http://localhost:8000/predict/game/0022100199"
+curl "http://localhost:8000/teams/1610612747/stats"
+curl "http://localhost:8000/analysis/feature-importance"
+curl "http://localhost:8000/analysis/home-advantage"
+curl "http://localhost:8000/games/seasons"
+
+# Interactive docs
+open http://localhost:8000/docs
+
+# Tests
+pytest tests/test_api.py -v
+```
+
 ## Project Status
 
 - [x] Phase 1 - Data Ingestion
 - [x] Phase 2 - Feature Engineering
 - [x] Phase 3 - Model Training + Evaluation
-- [ ] Phase 4 - FastAPI
+- [x] Phase 4 - FastAPI
 - [ ] Phase 5 - React Dashboard
 - [ ] Phase 6 - Deploy
