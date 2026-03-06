@@ -236,4 +236,3 @@ pytest tests/test_api.py -v
 - [x] Phase 3 - Model Training + Evaluation
 - [x] Phase 4 - FastAPI
 - [x] Phase 5 - React Dashboard
-- [ ] Phase 6 - Deploy
